@@ -1,0 +1,7 @@
+cv_analyzer/temp/*
+venv/
+cv_analyzer/__pycache__
+cv_analyzer/components/__pycache__
+cv_analyzer/utils/__pycache__
+temp/
+.vscode/

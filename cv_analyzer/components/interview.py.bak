@@ -1,0 +1,118 @@
+import streamlit as st
+from datetime import datetime
+import whisper
+import torch
+import os
+import pyttsx4 as pyttsx
+from speech_handler import SpeechHandler
+from interview_manager import InterviewManager
+
+def text_to_speech(text):
+    engine = pyttsx.init()
+    engine.save_to_file(text, 'temp/question.mp3')
+    engine.runAndWait()
+
+def render_interview_page(db):
+    st.title("Interview Assessment")
+    
+    # Setup session states
+    if 'interview_manager' not in st.session_state:
+        st.session_state.interview_manager = None
+    if 'current_question' not in st.session_state:
+        st.session_state.current_question = None
+    if 'audio_enabled' not in st.session_state:
+        st.session_state.audio_enabled = True
+    if 'video_enabled' not in st.session_state:
+        st.session_state.video_enabled = True
+    if 'interview_active' not in st.session_state:
+        st.session_state.interview_active = False
+    if 'cheating_detected' not in st.session_state:
+        st.session_state.cheating_detected = False
+
+    # Control panel
+    if st.session_state.interview_active:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🎤 Toggle Audio"):
+                st.session_state.audio_enabled = not st.session_state.audio_enabled
+        with col2:
+            if st.button("📹 Toggle Video"):
+                st.session_state.video_enabled = not st.session_state.video_enabled
+        with col3:
+            if st.button("⏹️ End Interview"):
+                if hasattr(st.session_state, 'speech_handler'):
+                    st.session_state.speech_handler.is_listening = False
+                    del st.session_state.speech_handler
+                st.session_state.interview_active = False
+                st.rerun()
+                
+        # Status indicators
+        st.write(f"Audio: {'On' if st.session_state.audio_enabled else 'Off'}")
+        st.write(f"Video: {'On' if st.session_state.video_enabled else 'Off'}")
+
+    # Job and CV selection
+    if not st.session_state.interview_active:
+        jobs = db.get_all_jobs()
+        job_titles = {job[1]: job[0] for job in jobs}
+        selected_job = st.selectbox("Select Job", list(job_titles.keys()))
+        
+        if selected_job:
+            candidates = db.get_candidates_by_job(job_titles[selected_job])
+            if candidates:
+                selected_candidate = st.selectbox("Select Candidate", [c[0] for c in candidates])
+                
+                if st.button("Start Interview"):
+                    job_desc = db.get_job_description(job_titles[selected_job])
+                    cv_text = db.get_candidate_cv(selected_candidate)
+                    st.session_state.interview_manager = InterviewManager(cv_text, job_desc)
+                    st.session_state.current_question = st.session_state.interview_manager.generate_next_question()
+                    st.session_state.interview_active = True
+                    if st.session_state.current_question:
+                        text_to_speech(st.session_state.current_question)
+                    st.rerun()
+
+    # Show current question and handle speech
+    if st.session_state.current_question and st.session_state.interview_active:
+        st.write("Question:", st.session_state.current_question)
+        
+        if st.session_state.audio_enabled:
+            if 'speech_handler' not in st.session_state:
+                def callback_fn(text):
+                    handle_speech_input(text, st.session_state.interview_manager)
+                # Pass as positional argument instead of keyword
+                st.session_state.speech_handler = SpeechHandler(callback_fn)
+                st.session_state.speech_handler.start_listening()
+
+            # Show current transcription in real-time
+            if hasattr(st.session_state, 'speech_handler'):
+                current_text = st.session_state.speech_handler.get_text()
+                if current_text:
+                    st.write("Current speech:", current_text)
+                    
+                    # Auto-process response when speech is complete
+                    if st.session_state.speech_handler.is_speech_complete():
+                        st.session_state.interview_manager.conversation_history.append(("Candidate", current_text))
+                        response = st.session_state.interview_manager.process_response(current_text)
+                        if response:
+                            st.session_state.current_response = response
+                            text_to_speech(response)
+                        st.session_state.current_question = st.session_state.interview_manager.generate_next_question()
+                        if st.session_state.current_question:
+                            text_to_speech(st.session_state.current_question)
+                        st.rerun()
+
+        # Show conversation history
+        if st.session_state.interview_manager:
+            st.subheader("Conversation History")
+            for role, text in st.session_state.interview_manager.conversation_history:
+                if role == "Interviewer":
+                    st.markdown(f"**AI**: {text}")
+                else:
+                    st.markdown(f"**You**: {text}")
+
+def handle_speech_input(text, interview_manager):
+    if text:
+        response = interview_manager.process_response(text)
+        if response:
+            st.session_state.current_response = response
+            text_to_speech(response)
