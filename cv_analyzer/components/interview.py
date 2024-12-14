@@ -95,31 +95,26 @@ class InterviewManager:
         self.conversation_history.append(("Candidate", response))
         prompt = f"""
         Role: Technical Assessment Expert with 15+ years industry experience
-
-        Complete Interview Context:
-        {self.conversation_history}
     
-        Current Response Being Evaluated: {response}
+        Analysis Target:
+        Candidate Response: {response}
         Position Requirements: {self.job_desc}
-
+    
         Evaluation Criteria:
         1. Technical Accuracy (Concepts, Terminology, Implementation)
         2. Problem-Solving Approach
         3. Communication Clarity
         4. Real-World Application
         5. Best Practices Awareness
-        6. Consistency with Previous Responses
-        7. Progressive Knowledge Demonstration
-
+    
         Output Requirements:
         - One concise, actionable feedback paragraph
         - Maximum 3 sentences
-        - Must reference any relevant connections to previous responses
         - Must include specific technical points
         - Balance positive aspects and improvement areas
         - Link directly to job requirements
         - If interview should end, start response with [END_INTERVIEW]
-
+    
         Format: Direct feedback only, no preamble or explanation.
         """
     
@@ -147,6 +142,40 @@ class InterviewManager:
                 return comment.strip()
 
     async def generate_score(self):
+        # Define the schema for structured interview scoring
+        score_schema = {
+            "type": "object",
+            "properties": {
+                "score": {
+                    "type": "string",
+                    "description": "Overall score out of 10"
+                },
+                "technical_strengths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of technical strengths demonstrated"
+                },
+                "areas_for_growth": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of areas needing improvement"
+                },
+                "hiring_recommendation": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "enum": ["HIRE", "NO HIRE"]
+                        },
+                        "justification": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "required": ["score", "technical_strengths", "areas_for_growth", "hiring_recommendation"]
+        }
+
         prompt = f"""
         Role: Chief Technical Officer conducting final candidate evaluation
         
@@ -157,45 +186,25 @@ class InterviewManager:
         {self.job_desc}
         
         Evaluation Framework:
-        1. Technical Proficiency
-        2. Problem-Solving Methodology
-        3. Communication Effectiveness
-        4. Industry Knowledge
-        5. Growth Potential
+        1. Technical Proficiency (0-10)
+        2. Problem-Solving Methodology (0-10)
+        3. Communication Effectiveness (0-10)
+        4. Industry Knowledge (0-10)
+        5. Growth Potential (0-10)
         
-        Required Output Format:
-        Score: [X]/10
-        
-        Technical Strengths:
-        - [Specific technical capability demonstrated]
-        - [Problem-solving approach highlight]
-        - [Communication or methodology strength]
-        
-        Development Areas:
-        - [Primary technical gap identified]
-        - [Secondary improvement opportunity]
-        
-        Hiring Recommendation: [HIRE/NO HIRE] because [one-line decisive justification]
-        
-        Note: Be extremely specific and reference actual responses from the conversation.
+        Provide a structured evaluation following the exact format specified.
         """
-        
-        score = ""
+
         async with aiohttp.ClientSession() as session:
-            async with session.post('http://localhost:11434/api/generate',
+            async with session.post('http://localhost:11434/api/chat',
                                   json={
                                       "model": "llama3.2",
                                       "prompt": prompt,
-                                      "stream": True
+                                      "format": score_schema,
+                                      "stream": False
                                   }) as response:
-                placeholder = st.empty()
-                async for line in response.content:
-                    if line:
-                        data = json.loads(line)
-                        if 'response' in data:
-                            score += data['response']
-                            placeholder.write(score)
-                return score.strip()
+                result = await response.json()
+                return result['response']
 class Interview:
     def __init__(self):
         self.speech_to_text = SpeechToText()
@@ -217,17 +226,24 @@ class Interview:
         return None
 
     async def save_interview_analysis(self, db, candidate_id, job_id, analysis_text):
-        # Parse the analysis text to extract key information
         lines = analysis_text.split('\n')
-        score = next(line.split(': ')[1] for line in lines if line.startswith('Score:'))
+    
+        # More robust score extraction
+        try:
+            score_line = next(line for line in lines if line.strip().startswith('Score:'))
+            score = score_line.split(':', 1)[1].strip()
+        except StopIteration:
+            score = "0/10"  # Default score if not found
+            st.warning("Score not found in analysis - using default value")
+    
         recommendation = next(line for line in lines if line.startswith('Recommendation:')).split(': ')[1]
         is_hired = 'Hire' in recommendation.split()[0]
-        
+    
         # Format strengths and areas for growth
         strengths = []
         areas_growth = []
         current_section = None
-        
+    
         for line in lines:
             if 'Strengths:' in line:
                 current_section = 'strengths'
@@ -238,7 +254,7 @@ class Interview:
                     strengths.append(line.strip()[2:])
                 elif current_section == 'growth':
                     areas_growth.append(line.strip()[2:])
-        
+    
         # Create analysis summary
         analysis_summary = {
             'score': score,
@@ -247,7 +263,7 @@ class Interview:
             'recommendation': recommendation,
             'is_hired': is_hired
         }
-        
+    
         # Save to database
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         db.save_interview_result(
@@ -260,7 +276,7 @@ class Interview:
             recommendation=recommendation,
             is_hired=is_hired
         )
-        
+    
         return analysis_summary
 
     async def render_interview_page(self, db):
@@ -300,21 +316,17 @@ class Interview:
                             self.text_to_speech(st.session_state.current_question)
                             st.session_state.interview_active = True
                         st.rerun()
+
         if st.session_state.interview_active:
             if st.button("⏹️ End Interview"):
                 st.session_state.interview_score = await st.session_state.interview_manager.generate_score()
                 st.session_state.interview_active = False
                 st.rerun()
 
-            if 'audio_recorded' not in st.session_state:
-                st.session_state.audio_recorded = False
-                
             st.write("Current Question:", st.session_state.current_question)
             
             wav_audio_data = st_audiorec()
-            
-            if wav_audio_data is not None and not st.session_state.audio_recorded:
-                st.session_state.audio_recorded = True
+            if wav_audio_data is not None:
                 transcription = self.get_transcription(wav_audio_data)
                 if transcription:
                     st.write("Your Response:", transcription)
@@ -326,9 +338,8 @@ class Interview:
                     if st.session_state.current_question:
                         st.session_state.tts_active = True
                         self.text_to_speech(st.session_state.current_question)
-                    # Reset the audio recording state
-                    st.session_state.audio_recorded = False
                     st.rerun()
+
             if st.session_state.interview_manager:
                 st.subheader("Interview Progress")
                 for role, text in st.session_state.interview_manager.conversation_history:
